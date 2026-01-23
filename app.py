@@ -6,7 +6,12 @@ import datetime
 import time
 import sqlite3
 import requests
-import streamlit as st
+import os
+
+BOT_TOKEN = os.getenv("8596468894:AAEeaaC11ib9sn6HuaSl3MldwKZEJ4iO8GI")
+CHAT_ID = os.getenv("8133102866")
+
+# ================= PAGE CONFIG =================
 st.set_page_config(page_title="GridMind AI", layout="wide")
 
 # ================= CONFIG =================
@@ -18,25 +23,30 @@ WINDOW_SIZE = 120
 REFRESH_RATE = 1
 
 # ================= DATABASE =================
-conn = sqlite3.connect(DB_NAME, check_same_thread=False)
-cur = conn.cursor()
+@st.cache_resource
+def get_db():
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    cur = conn.cursor()
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS energy (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT,
-    value REAL
-)
-""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS energy (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT,
+        value REAL
+    )
+    """)
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS alerts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT,
-    message TEXT
-)
-""")
-conn.commit()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT,
+        message TEXT
+    )
+    """)
+    conn.commit()
+    return conn, cur
+
+conn, cur = get_db()
 
 # ================= TELEGRAM =================
 def send_telegram_alert(message):
@@ -48,13 +58,12 @@ def send_telegram_alert(message):
             timeout=2
         )
     except:
-        pass
+        pass  # never block app
 
 # ================= UI =================
-st.set_page_config(page_title="GridMind AI", layout="wide")
 st.title("⚡ GridMind AI — Persistent Energy Monitoring")
 
-# ================= ENERGY =================
+# ================= ENERGY GENERATOR =================
 def generate_energy(t):
     base = 200 + t * 0.03
     noise = np.random.normal(0, 4)
@@ -63,7 +72,7 @@ def generate_energy(t):
     return base + noise
 
 # ================= INSERT DATA =================
-t = int(time.time())
+t = time.time()
 energy = generate_energy(t)
 
 cur.execute(
@@ -74,12 +83,15 @@ conn.commit()
 
 # ================= LOAD DATA =================
 df = pd.read_sql(
-    "SELECT * FROM energy ORDER BY id DESC LIMIT ?",
-    conn,
-    params=(WINDOW_SIZE,)
+    f"""
+    SELECT * FROM energy
+    ORDER BY id DESC
+    LIMIT {WINDOW_SIZE}
+    """,
+    conn
 ).iloc[::-1]
 
-# ================= ANOMALY =================
+# ================= ANOMALY DETECTION =================
 df["mean"] = df["value"].rolling(20).mean()
 df["std"] = df["value"].rolling(20).std()
 df["anomaly"] = abs(df["value"] - df["mean"]) > 3 * df["std"]
@@ -95,27 +107,46 @@ if not df.empty and df["anomaly"].iloc[-1]:
     conn.commit()
 
     send_telegram_alert(msg)
-    st.toast("📲 Telegram alert sent")
+    st.toast("📲 Telegram alert sent", icon="🚨")
 
 # ================= PLOT =================
+plot_area = st.empty()
+
 fig, ax = plt.subplots(figsize=(7, 3))
 ax.plot(df["value"], label="Energy")
-ax.scatter(df[df["anomaly"]].index, df[df["anomaly"]]["value"], color="red")
+ax.scatter(
+    df[df["anomaly"]].index,
+    df[df["anomaly"]]["value"],
+    label="Anomaly"
+)
 ax.legend()
-st.pyplot(fig)
+plot_area.pyplot(fig, clear_figure=True)
 plt.close(fig)
 
 # ================= METRICS =================
 c1, c2, c3 = st.columns(3)
+
 c1.metric("⚡ Live Energy", f"{energy:.2f}")
-c2.metric("🚨 Total Alerts", cur.execute("SELECT COUNT(*) FROM alerts").fetchone()[0])
-c3.metric("🧠 Status", "Unstable" if df["anomaly"].iloc[-1] else "Healthy")
+c2.metric(
+    "🚨 Total Alerts",
+    cur.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+)
+c3.metric(
+    "🧠 Status",
+    "Unstable" if df["anomaly"].iloc[-1] else "Healthy"
+)
 
 # ================= ALERT LOG =================
 st.subheader("🚨 Alert History")
-alerts_df = pd.read_sql("SELECT * FROM alerts ORDER BY id DESC LIMIT 5", conn)
+alerts_df = pd.read_sql(
+    "SELECT * FROM alerts ORDER BY id DESC LIMIT 5",
+    conn
+)
 st.dataframe(alerts_df, use_container_width=True)
 
-# ================= REFRESH =================
+# ================= AUTO REFRESH =================
 time.sleep(REFRESH_RATE)
-st.experimental_rerun()
+st.rerun()
+
+
+
